@@ -258,7 +258,7 @@ def get_afterstate(env, state, action):
     return tmp_env.board, tmp_env.score
     
     
-class UCTNode:
+class MCTNode:
     def __init__(self, state, score, random_node = False, n_sample = 10, parent=None, action=None):
         self.state = state
         self.score = score
@@ -280,12 +280,12 @@ class UCTNode:
                 sim_env.board = state.copy()
                 sim_env.score = score
                 sim_env.add_random_tile()
-                self.children[i] = UCTNode(sim_env.board.copy(), sim_env.score, parent=self, action=None)
+                self.children[i] = MCTNode(sim_env.board.copy(), sim_env.score, parent=self, action=None)
                 
     def fully_expanded(self):
         return len(self.untried_actions) == 0
 
-class UCTMCTS:
+class MCTS:
     def __init__(self, env, approximator, iterations=500, exploration_constant=1.41, rollout_depth=0, n_sim=10):
         self.env = env
         self.approximator = approximator
@@ -354,7 +354,7 @@ class UCTMCTS:
     def expansion(self, node, sim_env):
         for action in node.untried_actions:
             state, score = get_afterstate(sim_env, node.state, action)
-            node.children[action] = UCTNode(state.copy(), score, random_node=True, n_sample=self.n_sim, parent = node, action = action)
+            node.children[action] = MCTNode(state.copy(), score, random_node=True, n_sample=self.n_sim, parent = node, action = action)
         action = node.untried_actions.pop(random.randint(0, len(node.untried_actions) - 1))
         node = node.children[action]
         return node
@@ -552,15 +552,15 @@ if path is not None:
         approximator.weights = pickle.load(f)
         print("Weights loaded from", path)
 
-uct_mcts = UCTMCTS(env, approximator)
+mcts = MCTS(env, approximator)
 
 def get_action(state, score):
-    root = UCTNode(state, score)
+    root = MCTNode(state, score)
 
-    for _ in range(uct_mcts.iterations):
-        uct_mcts.run_simulation(root)
+    for _ in range(mcts.iterations):
+        mcts.run_simulation(root)
 
-    best_action, Q = uct_mcts.best_action(root)
+    best_action, Q = mcts.best_action(root)
     return best_action
 
 def cal_avg_score(scores):
