@@ -286,7 +286,7 @@ class MCTNode:
         return len(self.untried_actions) == 0
 
 class MCTS:
-    def __init__(self, env, approximator, iterations=500, exploration_constant=1.41, rollout_depth=0, n_sim=10):
+    def __init__(self, env, approximator, iterations=300, exploration_constant=1.41, rollout_depth=0, n_sim=10):
         self.env = env
         self.approximator = approximator
         self.iterations = iterations
