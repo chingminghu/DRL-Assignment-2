@@ -8,7 +8,19 @@ import matplotlib.pyplot as plt
 import copy
 import random
 import math
+from collections import defaultdict
 
+COLOR_MAP = {
+    0: "#cdc1b4", 2: "#eee4da", 4: "#ede0c8", 8: "#f2b179",
+    16: "#f59563", 32: "#f67c5f", 64: "#f65e3b", 128: "#edcf72",
+    256: "#edcc61", 512: "#edc850", 1024: "#edc53f", 2048: "#edc22e",
+    4096: "#3c3a32", 8192: "#3c3a32", 16384: "#3c3a32", 32768: "#3c3a32"
+}
+TEXT_COLOR = {
+    2: "#776e65", 4: "#776e65", 8: "#f9f6f2", 16: "#f9f6f2",
+    32: "#f9f6f2", 64: "#f9f6f2", 128: "#f9f6f2", 256: "#f9f6f2",
+    512: "#f9f6f2", 1024: "#f9f6f2", 2048: "#f9f6f2", 4096: "#f9f6f2"
+}
 
 class Game2048Env(gym.Env):
     def __init__(self):
@@ -230,11 +242,348 @@ class Game2048Env(gym.Env):
 
         # If the simulated board is different from the current board, the move is legal
         return not np.array_equal(self.board, temp_board)
+    
+def get_afterstate(env, state, action):
+    tmp_env = copy.deepcopy(env)
+    tmp_env.board = state.copy()
+    tmp_env.score = 0
+    if action == 0:
+        moved = tmp_env.move_up()
+    elif action == 1:
+        moved = tmp_env.move_down()
+    elif action == 2:
+        moved = tmp_env.move_left()
+    elif action == 3:
+        moved = tmp_env.move_right()
+    return tmp_env.board, tmp_env.score
+    
+    
+class UCTNode:
+    def __init__(self, state, score, random_node = False, n_sample = 10, parent=None, action=None):
+        self.state = state
+        self.score = score
+        self.random_node = random_node  # the state is the one before adding the new random tile if random_node
+        self.parent = parent
+        self.action = action
+        self.children = {}
+        self.visits = 0
+        self.total_reward = 0.0
+        
+        env = Game2048Env()
+        env.board = state.copy()
+        env.score = score
+        self.untried_actions = [a for a in range(4) if env.is_move_legal(a)]
+        
+        if self.random_node:
+            for i in range(n_sample):
+                sim_env = copy.deepcopy(env)
+                sim_env.board = state.copy()
+                sim_env.score = score
+                sim_env.add_random_tile()
+                self.children[i] = UCTNode(sim_env.board.copy(), sim_env.score, parent=self, action=None)
+                
+    def fully_expanded(self):
+        return len(self.untried_actions) == 0
+
+class UCTMCTS:
+    def __init__(self, env, approximator, iterations=500, exploration_constant=1.41, rollout_depth=0, n_sim=10):
+        self.env = env
+        self.approximator = approximator
+        self.iterations = iterations
+        self.c = exploration_constant
+        self.rollout_depth = rollout_depth
+        self.n_sim = n_sim
+
+    def create_env_from_state(self, state, score):
+        new_env = copy.deepcopy(self.env)
+        new_env.board = state.copy()
+        new_env.score = score
+        return new_env
+
+    def select_child(self, node):
+        # Q + c * sqrt(log(parent_visits)/child_visits)
+        cursor = node
+        while cursor.children:
+            if cursor.random_node:
+                cursor = cursor.children[random.randint(0, len(cursor.children) - 1)]
+            else:
+                if cursor.fully_expanded():
+                    ucb = np.zeros(4)
+                    ucb.fill(-np.inf)
+                    for action, child in cursor.children.items():
+                        Q = child.total_reward / child.visits
+                        ucb[action] = Q + self.c * np.sqrt(np.log(cursor.visits) / child.visits)
+                    action_chosen = np.argmax(ucb)
+                else:
+                    action_chosen = cursor.untried_actions.pop(random.randint(0, len(cursor.untried_actions) - 1))
+                cursor = cursor.children[action_chosen]
+        return cursor
+
+    def rollout(self, root, depth):
+        total_score = 0
+        for i in range(self.n_sim):
+            node = root.children[i]
+            sim_env = self.create_env_from_state(node.state, node.score)
+            done = False
+            score = node.score
+            afterstate = root.state.copy()
+            for __ in range(depth):
+                legal_moves = [action for action in [0, 1, 2, 3] if sim_env.is_move_legal(action)]
+                if not legal_moves:
+                    done = True
+                    break
+                action = random.choice(legal_moves)
+                afterstate, __ = get_afterstate(sim_env, sim_env.board, action)
+                state, score, done, __ = sim_env.step(action)
+                
+            score += self.approximator.value(afterstate)
+            total_score += score
+            
+        return total_score / self.n_sim
+
+    def backpropagate(self, node, reward):
+        cursor = node
+        while cursor.parent is not None:
+            cursor.visits += 1
+            cursor.total_reward += reward - cursor.score
+            cursor = cursor.parent
+        cursor.visits += 1
+        cursor.total_reward += reward - cursor.score
+        return
+    
+    def expansion(self, node, sim_env):
+        for action in node.untried_actions:
+            state, score = get_afterstate(sim_env, node.state, action)
+            node.children[action] = UCTNode(state.copy(), score, random_node=True, n_sample=self.n_sim, parent = node, action = action)
+        action = node.untried_actions.pop(random.randint(0, len(node.untried_actions) - 1))
+        node = node.children[action]
+        return node
+
+    def run_simulation(self, root):
+        node = root
+
+        node = self.select_child(node)
+        sim_env = self.create_env_from_state(node.state, node.score)
+        
+        if not sim_env.is_game_over():    
+            if node == root or node.visits > 4:
+                node = self.expansion(node, sim_env)
+            else:
+                node = node.parent
+                
+            rollout_reward = self.rollout(node, self.rollout_depth)
+        else:
+            rollout_reward = node.score
+            
+        self.backpropagate(node, rollout_reward)
+    
+    def best_action(self, root):
+        Q = np.zeros(4)
+        Q.fill(-np.inf)
+        for action, child in root.children.items():
+            Q[action] = child.total_reward / child.visits
+        best_action = np.argmax(Q)
+        return best_action, Q
+
+def rot90(pattern):
+      return [(x, 3 - y) for (y, x) in pattern]
+
+def ref(pattern):
+  return [(y, 3 - x) for (y, x) in pattern]
+
+class NTupleApproximator:
+    def __init__(self, board_size, patterns):
+        self.board_size = board_size
+        self.patterns = patterns
+        self.weights = [defaultdict(float) for _ in patterns]
+        self.symmetry_patterns = []
+        for pattern in self.patterns:
+            syms = self.generate_symmetries(pattern)
+            for syms_ in syms:
+                self.symmetry_patterns.append(syms_)
+
+    def generate_symmetries(self, pattern):
+        syms = []
+        for __ in range(4):
+            syms.append(pattern)
+            syms.append(ref(pattern))
+            pattern = rot90(pattern)
+        return syms
+
+    def tile_to_index(self, tile):
+        if tile == 0:
+            return 0
+        else:
+            return int(math.log(tile, 2))
+
+    def get_feature(self, board, coords):
+        return tuple(self.tile_to_index(board[y][x]) for (y, x) in coords)
+
+    def value(self, board):
+        value = 0
+        for (index, pattern) in enumerate(self.symmetry_patterns):
+            feature = self.get_feature(board, pattern)
+            value += self.weights[index // 8][feature]
+        return value
+
+    def update(self, board, delta, alpha):
+        weight_update = alpha * delta
+        for (index, pattern) in enumerate(self.symmetry_patterns):
+            feature = self.get_feature(board, pattern)
+            self.weights[index // 8][feature] += weight_update
+        return
+
+    def simulate_action(self, env, state, action, gamma):
+        sim_env = copy.deepcopy(env)
+        sim_env.board = state.copy()
+        sim_env.score = 0
+        afterstate, reward = get_afterstate(sim_env, state, action)
+        value = self.value(afterstate)
+        return reward + value * gamma
+
+def td_learning(env, approximator, num_episodes=50000, alpha=0.01, gamma=0.99, epsilon=0.1):
+    final_scores = []
+    success_flags = []
+
+    try:
+        if path is not None:
+            with open(path, "rb") as f:
+                approximator.weights = pickle.load(f)
+                print("Weights loaded from", path)
+        
+        for episode in range(num_episodes):
+            state = env.reset().copy()
+            trajectory = []
+            previous_score = 0
+            beforestate = np.zeros((4, 4), dtype=int)
+            done = False
+            max_tile = np.max(state)
+
+            while not done:
+                legal_moves = [a for a in range(4) if env.is_move_legal(a)]
+                if not legal_moves:
+                    break
+                Q_values = np.zeros(4)
+                Q_values.fill(-np.inf)
+                for action in legal_moves:
+                    Q_values[action] = approximator.simulate_action(env, state, action, gamma)
+
+                action = np.argmax(Q_values)
+
+                # if np.random.rand() < epsilon:
+                #     action = np.random.choice(legal_moves)
+
+                afterstate, __ = get_afterstate(env, state, action)
+                next_state, new_score, done, _ = env.step(action)
+                next_state = next_state.copy()
+                incremental_reward = new_score - previous_score
+                previous_score = new_score
+                max_tile = max(max_tile, np.max(next_state))
+
+                trajectory.append((beforestate, action, incremental_reward, afterstate))
+
+                state = next_state
+                beforestate = afterstate
+                
+            # # trajectory = [(state, action, reward, next_state), ... ]
+            # for i in reversed(range(len(trajectory))):
+            #     value = approximator.value(trajectory[i][0])
+            #     end = i + n_steps if i + n_steps < len(trajectory) else len(trajectory) - 1
+            #     target = approximator.value(trajectory[end][3])
+            #     for j in reversed(range(i, end + 1)):
+            #         target = trajectory[j][2] + gamma * target
+            #     delta = target - value
+            #     approximator.update(trajectory[i][0], delta, alpha)
+                
+            for (beforestate, action, reward, afterstate) in reversed(trajectory):
+                value = approximator.value(beforestate)
+                target = reward + gamma * approximator.value(afterstate)
+                delta = target - value
+                approximator.update(beforestate, delta, alpha)
+
+            final_scores.append(env.score)
+            success_flags.append(1 if max_tile >= 2048 else 0)
+
+            if (episode + 1) % print_interval == 0:
+                avg_score = np.mean(final_scores[-print_interval:])
+                success_rate = np.sum(success_flags[-print_interval:]) / 100
+                print(f"Episode {episode+1}/{num_episodes} | Avg Score: {avg_score:.2f} | Success Rate: {success_rate:.2f}")
+    except KeyboardInterrupt:
+        print(f"Training interrupted at episode {episode + 1}")
+
+    return final_scores
+
+print_interval = 100
+avg_interval = 100
+n_episodes = 50000
+
+path = "weights.pkl"
+
+patterns = [[(0, 0), (0, 1), (1, 0), (1, 1), (0, 2), (0, 3)],
+            [(1, 0), (1, 1), (2, 0), (2, 1), (1, 2), (1, 3)],
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)],
+            [(0, 0), (0, 1), (1, 1), {1, 2}, (1, 3), (2, 2)],
+            [(1, 0), (1, 2), (2, 0), (2, 1), (2, 2), (3, 0)],
+            [(0, 0), (0, 1), (1, 1), (2, 1), (3, 1), (3, 2)],
+            [(0, 0), (0, 1), (1, 1), (2, 0), (2, 1), (3, 1)],
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 2)]]
+
+"""
+the patterns chosen:
+1.      2.      3.      4.
+■■■■    □□□□    ■■■□    ■■□□
+■■□□    ■■■■    ■■■□    □■■■
+□□□□    ■■□□    □□□□    □□■□
+□□□□    □□□□    □□□□    □□□□
+
+5.      6.      7.      8.
+□□□□    ■■□□    ■■□□    ■■■□
+■□■□    □■□□    □■□□    ■□■□
+■■■□    □■□□    ■■□□    □□■□
+■□□□    □■■□    □■□□    □□□□
+
+"""
+
+approximator = NTupleApproximator(board_size=4, patterns=patterns)
+
+env = Game2048Env()
+if path is not None:
+    with open(path, "rb") as f:
+        approximator.weights = pickle.load(f)
+        print("Weights loaded from", path)
+
+uct_mcts = UCTMCTS(env, approximator)
 
 def get_action(state, score):
-    env = Game2048Env()
-    return random.choice([0, 1, 2, 3]) # Choose a random action
+    root = UCTNode(state, score)
+
+    for _ in range(uct_mcts.iterations):
+        uct_mcts.run_simulation(root)
+
+    best_action, Q = uct_mcts.best_action(root)
+    return best_action
+
+def cal_avg_score(scores):
+    avg_scores = []
+    for i in range(len(scores) - avg_interval + 1):
+        avg = 0
+        for j in range(avg_interval):
+            avg += scores[i + j]
+        avg /= avg_interval
+        avg_scores.append(avg)
+    return avg_scores
+
+if __name__ == '__main__':
+    scores = td_learning(env, approximator, num_episodes=n_episodes, alpha=0.005, gamma=0.99, epsilon=0.01)    
+    avg_scores = cal_avg_score(scores)
+    plt.plot(scores, label = 'return', color = 'lightblue')
+    plt.plot([i + avg_interval - 1 for i in range(len(avg_scores))], avg_scores, label = 'avg_return')
+    plt.legend()
+    plt.xlabel('num_episodes')
+    plt.savefig('learning_fig.png')
+    plt.show()
     
-    # You can submit this random agent to evaluate the performance of a purely random strategy.
-
-
+    if(input("Save weights? (y/n): ").lower() == "y"):
+        with open("weights.pkl", "wb") as f:
+            pickle.dump(approximator.weights, f)
+            print("Weights saved to weights.pkl")
