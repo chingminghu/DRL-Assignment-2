@@ -286,7 +286,7 @@ class MCTNode:
         return len(self.untried_actions) == 0
 
 class MCTS:
-    def __init__(self, env, approximator, iterations=300, exploration_constant=1.41, rollout_depth=0, n_sim=10):
+    def __init__(self, env, approximator, iterations=400, exploration_constant=1, rollout_depth=0, n_sim=10):
         self.env = env
         self.approximator = approximator
         self.iterations = iterations
@@ -446,11 +446,6 @@ def td_learning(env, approximator, num_episodes=50000, alpha=0.01, gamma=0.99, e
     success_flags = []
 
     try:
-        if path is not None:
-            with open(path, "rb") as f:
-                approximator.weights = pickle.load(f)
-                print("Weights loaded from", path)
-        
         for episode in range(num_episodes):
             state = env.reset().copy()
             trajectory = []
