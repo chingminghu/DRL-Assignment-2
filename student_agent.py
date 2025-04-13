@@ -286,7 +286,7 @@ class MCTNode:
         return len(self.untried_actions) == 0
 
 class MCTS:
-    def __init__(self, env, approximator, iterations=300, exploration_constant=1, rollout_depth=0, n_sim=5):
+    def __init__(self, env, approximator, iterations=400, exploration_constant=1, rollout_depth=0, n_sim=10):
         self.env = env
         self.approximator = approximator
         self.iterations = iterations
@@ -366,7 +366,7 @@ class MCTS:
         sim_env = self.create_env_from_state(node.state, node.score)
         
         if not sim_env.is_game_over():    
-            if node == root or node.visits > 4:
+            if node == root or node.visits > 2:
                 node = self.expansion(node, sim_env)
             else:
                 node = node.parent
